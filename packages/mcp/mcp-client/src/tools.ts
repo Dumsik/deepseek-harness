@@ -187,6 +187,16 @@ export async function syncTools(
   return disposers
 }
 
+/** Payload of a `resource` content item, as the MCP spec spells it. */
+interface McpResourcePayload {
+  uri?: string
+  mimeType?: string
+  /** Text body of a text resource; the model reads it as-is. */
+  text?: string
+  /** Base64 body of a binary resource; the model gets a one-line summary instead. */
+  blob?: string
+}
+
 /** Fields read from canonical content, including policy-owned value replacements. */
 interface McpContentBlock {
   type: string
@@ -195,6 +205,7 @@ interface McpContentBlock {
   data?: string
   name?: string
   uri?: string
+  resource?: McpResourcePayload
 }
 
 /** Async rich projection staged for one exact ToolRuntime execution. */
@@ -286,7 +297,7 @@ function createOutput(rawName: string, structuredSchema: JsonSchemaNode | undefi
     },
     render(_args: unknown, value: JsonValue) {
       const result = value as McpResult
-      return [{ type: 'text', text: extractText(result.content, rawName) }]
+      return [{ type: 'text', text: extractText(result.content, rawName, result.structuredContent) }]
     },
   }
 }
@@ -317,7 +328,7 @@ function createExecutor(
     const result = parsed.value
 
     const content = result.content as unknown as JsonValue[]
-    const text = extractText(content, rawName)
+    const text = extractText(content, rawName, result.structuredContent)
 
     // MCP isError → throw so ToolRuntime produces an isError result for the model.
     if (result.isError === true) {
@@ -468,15 +479,23 @@ async function prepareImageProjection(
 /**
  * Extract text from an MCP content array into a single string.
  * - text blocks: join with '\n'
- * - image/audio/resource blocks: replaced with a placeholder
+ * - resource blocks: their `text` payload is inlined as-is; a binary `blob`
+ *   becomes a one-line summary carrying the URI and media type
+ * - image/audio blocks: replaced with a placeholder
+ * - when nothing is model-visible but `structuredContent` exists, it is
+ *   rendered as JSON: the projection placeholder is the only content then
  *
  * Policy-owned canonical-value replacements may omit fields required on the MCP wire.
  */
-function extractText(mcpContent: JsonValue[], toolName: string): string {
+function extractText(mcpContent: JsonValue[], toolName: string, structuredContent?: JsonValue): string {
   const content = projectContent(mcpContent, toolName)
   // The default image projector below also returns text, so this local call
   // cannot produce a core image block.
-  return content.map(block => (block as Extract<ContentBlock, { type: 'text' }>).text).join('\n')
+  const text = content.map(block => (block as Extract<ContentBlock, { type: 'text' }>).text).join('\n')
+  if (structuredContent !== undefined && text === `(${toolName} returned no model-visible content)`) {
+    return JSON.stringify(structuredContent, null, 2)
+  }
+  return text
 }
 
 /**
@@ -523,9 +542,17 @@ function projectContent(
       case 'audio':
         text.push(`[audio result unsupported: ${block.mimeType ?? 'unknown media type'}; raw audio data remains available to programmatic callers]`)
         break
-      case 'resource':
-        text.push('[embedded resource unsupported; raw resource data remains available to programmatic callers]')
+      case 'resource': {
+        const resource = block.resource
+        if (resource?.text !== undefined) {
+          text.push(resource.text)
+        } else if (resource?.blob !== undefined) {
+          text.push(`[resource: ${resource.uri ?? 'unknown URI'} (${resource.mimeType ?? 'unknown media type'}); binary content is not shown]`)
+        } else {
+          text.push('[embedded resource unavailable: the MCP block carries neither text nor blob]')
+        }
         break
+      }
       default:
         text.push(`[unsupported MCP content type: ${block.type}]`)
     }

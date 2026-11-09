@@ -939,19 +939,81 @@ describe('tool execution', () => {
     })
   })
 
-  it('reports unsupported embedded resources without discarding the raw block', async () => {
+  it('inlines the text of an embedded resource', async () => {
     const client = createMockClient(
       [{ name: 'res_tool', inputSchema: { type: 'object' } }],
-      { content: [{ type: 'resource', resource: { uri: 'memory://document', text: 'Recorded text.' } }] },
+      { content: [{ type: 'resource', resource: { uri: 'memory://document', mimeType: 'text/markdown', text: 'Recorded text.' } }] },
     )
 
     await syncTools(client as never, ctx, defaultOpts, new Map())
     const result = await executeToolFixture(ctx, { signal: testToolSignal, callId: ToolCallId('c1'), name: 'mcp__srv__res_tool', arguments: {} })
 
+    expect(result.content[0]).toEqual({ type: 'text', text: 'Recorded text.' })
+  })
+
+  it('summarizes a binary embedded resource instead of inlining its payload', async () => {
+    const client = createMockClient(
+      [{ name: 'bin_tool', inputSchema: { type: 'object' } }],
+      { content: [{ type: 'resource', resource: { uri: 'memory://archive.zip', mimeType: 'application/zip', blob: 'UEsDBBQ=' } }] },
+    )
+
+    await syncTools(client as never, ctx, defaultOpts, new Map())
+    const result = await executeToolFixture(ctx, { signal: testToolSignal, callId: ToolCallId('c1'), name: 'mcp__srv__bin_tool', arguments: {} })
+
     expect(result.content[0]).toEqual({
       type: 'text',
-      text: '[embedded resource unsupported; raw resource data remains available to programmatic callers]',
+      text: '[resource: memory://archive.zip (application/zip); binary content is not shown]',
     })
+  })
+
+  it('renders structuredContent as JSON when the content array is empty', async () => {
+    const client = createMockClient(
+      [{ name: 'struct_tool', inputSchema: { type: 'object' } }],
+      { content: [], structuredContent: { answer: 42 } },
+    )
+
+    await syncTools(client as never, ctx, defaultOpts, new Map())
+    const result = await executeToolFixture(ctx, { signal: testToolSignal, callId: ToolCallId('c1'), name: 'mcp__srv__struct_tool', arguments: {} })
+
+    expect(result.content[0]).toEqual({ type: 'text', text: JSON.stringify({ answer: 42 }, null, 2) })
+  })
+
+  it('keeps a text block authoritative over structuredContent', async () => {
+    const client = createMockClient(
+      [{ name: 'both_tool', inputSchema: { type: 'object' } }],
+      { content: [{ type: 'text', text: 'OK' }], structuredContent: { answer: 42 } },
+    )
+
+    await syncTools(client as never, ctx, defaultOpts, new Map())
+    const result = await executeToolFixture(ctx, { signal: testToolSignal, callId: ToolCallId('c1'), name: 'mcp__srv__both_tool', arguments: {} })
+
+    expect(result.content[0]).toEqual({ type: 'text', text: 'OK' })
+  })
+
+  it('carries the resource text into an isError message', async () => {
+    const client = createMockClient(
+      [{ name: 'res_fail', inputSchema: { type: 'object' } }],
+      { content: [{ type: 'resource', resource: { uri: 'memory://document', mimeType: 'text/plain', text: 'Denied.' } }], isError: true },
+    )
+
+    await syncTools(client as never, ctx, defaultOpts, new Map())
+    const result = await executeToolFixture(ctx, { signal: testToolSignal, callId: ToolCallId('c1'), name: 'mcp__srv__res_fail', arguments: {} })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0]).toEqual({ type: 'text', text: 'Error: Denied.' })
+  })
+
+  it('carries structuredContent into an isError message', async () => {
+    const client = createMockClient(
+      [{ name: 'struct_fail', inputSchema: { type: 'object' } }],
+      { content: [], structuredContent: { error: 'denied' }, isError: true },
+    )
+
+    await syncTools(client as never, ctx, defaultOpts, new Map())
+    const result = await executeToolFixture(ctx, { signal: testToolSignal, callId: ToolCallId('c1'), name: 'mcp__srv__struct_fail', arguments: {} })
+
+    expect(result.isError).toBe(true)
+    expect(result.content[0]).toEqual({ type: 'text', text: `Error: ${JSON.stringify({ error: 'denied' }, null, 2)}` })
   })
 
   it('preserves resource-link name and URI in the model projection', async () => {
